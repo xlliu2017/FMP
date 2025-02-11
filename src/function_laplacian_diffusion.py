@@ -1,10 +1,10 @@
 import torch
 from torch import nn
 import torch_sparse
-
+import numpy as np
 from base_classes import ODEFunc
 from utils import MaxNFEException
-
+from sMP2 import UFGLevel
 
 # Define the ODE function.
 # Input:
@@ -16,7 +16,7 @@ class LaplacianODEFunc(ODEFunc):
 
   # currently requires in_features = out_features
   def __init__(self, in_features, out_features, opt, data, device):
-    super(LaplacianODEFunc, self).__init__(opt, data, device)
+    super().__init__(opt, data, device)
 
     self.in_features = in_features
     self.out_features = out_features
@@ -24,13 +24,22 @@ class LaplacianODEFunc(ODEFunc):
     self.d = nn.Parameter(torch.zeros(opt['hidden_dim']) + 1)
     self.alpha_sc = nn.Parameter(torch.ones(1))
     self.beta_sc = nn.Parameter(torch.ones(1))
-
+    if self.opt['data_norm'] == 'ufg':
+      self.UFGLevel1 = UFGLevel(in_features, in_features, init_scale=opt['init_scale_1'], channel_mix=opt['channel_mix'])
+      self.UFGLevel2 = UFGLevel(in_features, in_features, init_scale=opt['init_scale_2'], channel_mix=opt['channel_mix'])
+      self.UFGLevel3 = UFGLevel(in_features, in_features, init_scale=opt['init_scale_3'], channel_mix=opt['channel_mix'])
+  
   def sparse_multiply(self, x):
     if self.opt['block'] in ['attention']:  # adj is a multihead attention
       mean_attention = self.attention_weights.mean(dim=1)
       ax = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
     elif self.opt['block'] in ['mixed', 'hard_attention']:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.attention_weights, x.shape[0], x.shape[0], x)
+    elif self.opt['data_norm'] == 'ufg':
+      ax1 = self.UFGLevel1(x, self.edge_index_1, self.edge_weight_1)
+      ax2 = self.UFGLevel2(x, self.edge_index_2, self.edge_weight_2)
+      ax3 = self.UFGLevel3(x, self.edge_index_3, self.edge_weight_3)
+      ax =  ax2 -ax3 #
     else:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], x)
     return ax
@@ -45,7 +54,15 @@ class LaplacianODEFunc(ODEFunc):
     else:
       alpha = self.alpha_train
 
-    f = alpha * (ax - x)
-    if self.opt['add_source']:
-      f = f + self.beta_train * self.x0
+    # f = alpha * ((ax - x) + 0.5*(torch.sin(np.pi*x)-1/2*(x**2)*(x)))
+    if self.opt['data_norm'] == 'ufg':
+      f = ax #+ 0.5*(torch.sin(np.pi*x)-1/2*(x**2)*(x))
+      if self.opt['add_source']:
+        f = f + self.beta_train * self.x0
+      # if self.opt['add_source']:
+      #   f = f + self.beta_train * self.x0
+    else: 
+      f = alpha * ((ax - x) ) #+ 0.3*(torch.sin(np.pi*x)-1/2*(x**2)*(x))
+      if self.opt['add_source']:
+        f = f + self.beta_train * self.x0
     return f

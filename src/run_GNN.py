@@ -6,13 +6,13 @@ import numpy as np
 import torch
 from torch_geometric.nn import GCNConv, ChebConv  # noqa
 import torch.nn.functional as F
-from ogb.nodeproppred import Evaluator
+# from ogb.nodeproppred import Evaluator
 
 from GNN import GNN
 from GNN_early import GNNEarly
 from GNN_KNN import GNN_KNN
 from GNN_KNN_early import GNNKNNEarly
-from data import get_dataset, set_train_val_test_split
+from data import get_dataset, set_train_val_test_split, choose1mask
 from graph_rewiring import apply_KNN, apply_beltrami, apply_edge_sampling
 from best_params import best_params_dict
 from heterophilic import get_fixed_splits
@@ -20,6 +20,9 @@ from utils import ROOT_DIR
 from CGNN import CGNN, get_sym_adj
 from CGNN import train as train_cgnn
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set()
 
 def get_optimizer(name, parameters, lr, weight_decay=0):
   if name == 'sgd':
@@ -78,6 +81,7 @@ def train(model, optimizer, data, pos_encoding=None):
   else:
     lf = torch.nn.CrossEntropyLoss()
     loss = lf(out[data.train_mask], data.y.squeeze()[data.train_mask])
+    # loss = lf(out[data.train_mask[:,6]], data.y.squeeze()[data.train_mask[:,6]])
   if model.odeblock.nreg > 0:  # add regularisation - slower for small data, but faster and better performance for large data
     reg_states = tuple(torch.mean(rs) for rs in model.reg_states)
     regularization_coeffs = model.regularization_coeffs
@@ -142,6 +146,7 @@ def test(model, data, pos_encoding=None, opt=None):  # opt required for runtime 
     feat = add_labels(feat, data.y, data.train_mask, model.num_classes, model.device)
   logits, accs = model(feat, pos_encoding), []
   for _, mask in data('train_mask', 'val_mask', 'test_mask'):
+    # mask = mask[:,6]
     pred = logits[mask].max(1)[1]
     acc = pred.eq(data.y[mask]).sum().item() / mask.sum().item()
     accs.append(acc)
@@ -188,6 +193,8 @@ def test_OGB(model, data, pos_encoding, opt):
 
 
 def merge_cmd_args(cmd_opt, opt):
+  if cmd_opt['data_norm'] == 'ufg':
+    opt['data_norm'] = 'ufg'
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
   if cmd_opt['function'] is not None:
@@ -210,6 +217,8 @@ def merge_cmd_args(cmd_opt, opt):
     opt['not_lcc'] = False
   if cmd_opt['num_splits'] != 1:
     opt['num_splits'] = cmd_opt['num_splits']
+  if cmd_opt['hidden_dim'] != 16:
+    opt['hidden_dim'] = cmd_opt['hidden_dim']
 
 
 def main(cmd_opt):
@@ -219,8 +228,14 @@ def main(cmd_opt):
     merge_cmd_args(cmd_opt, opt)
   except KeyError:
     opt = cmd_opt
-
+  # opt = cmd_opt
+  
+  # torch.manual_seed(2000)
+  print(opt['data_norm'], opt['geom_gcn_splits'])
   dataset = get_dataset(opt, f'{ROOT_DIR}/data', opt['not_lcc'])
+  if  opt["geom_gcn_splits"]:
+    dataset.data = choose1mask(dataset.data, 1)
+     
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
   if opt['beltrami']:
@@ -236,11 +251,11 @@ def main(cmd_opt):
 
   if not opt['planetoid_split'] and opt['dataset'] in ['Cora','Citeseer','Pubmed']:
     dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500)
-
+  
   data = dataset.data.to(device)
 
   parameters = [p for p in model.parameters() if p.requires_grad]
-  print_model_params(model)
+  # print_model_params(model)
   optimizer = get_optimizer(opt['optimizer'], parameters, lr=opt['lr'], weight_decay=opt['decay'])
   best_time = best_epoch = train_acc = val_acc = test_acc = 0
 
@@ -257,6 +272,42 @@ def main(cmd_opt):
     tmp_train_acc, tmp_val_acc, tmp_test_acc = this_test(model, data, pos_encoding, opt)
 
     best_time = opt['time']
+    # print(model.odeblock.odefunc.UFGLevel3.filter)
+    if epoch ==1 or epoch == opt['epoch']-1:
+      # inter_step = model.odeblock.odefunc.inter_step
+      
+      # s = inter_step[0].cpu().detach().numpy()
+   
+      # plt.figure()
+      # plt.plot(s[:,5],'o')
+      # plt.show()
+      # plt.title(f'{model.m1.bias[5].item()} bias')
+      # plt.savefig(f'figure_inter_step_/'+opt['inter_step_filename']+f'epoch={epoch}_{0}.png',dpi = 100)
+    
+      # plt.figure()
+      # s = inter_step[-1].cpu().detach().numpy()
+      # print(max(s[:,5]), min(s[:,5]))
+      # plt.plot(s[:,5],'o')
+      # plt.show()
+      # plt.title(f'{model.m1.bias[5].item()} bias')
+      # plt.savefig(f'figure_inter_step_/'+opt['inter_step_filename']+f'epoch={epoch}_final.png',dpi = 100)
+      # plt.close()
+      
+      with torch.no_grad():
+        model.eval()
+        # print(model.odeblock.odefunc.edge_index_1)
+        # inter_step = model.odeblock.integrateAt(torch.linspace(0, opt['time'], steps=50).to(device))
+        # print(inter_step.shape)
+        # energy = [model.compute_energy(inter_step[i],data.edge_index) for i in range(inter_step.shape[0])]
+        energy = model.compute_enegry_evolution(data.edge_index, torch.linspace(0, opt['time'], steps=50).to(device))
+      
+      plt.figure()
+      plt.plot(energy) 
+      plt.xlabel('Time', fontsize=18)
+      plt.ylabel('Dirichlet energy', fontsize=18)
+      # plt.savefig(f'figure/'+f'epoch={epoch}_final.png',dpi = 500)
+      plt.show()
+
     if tmp_val_acc > val_acc:
       best_epoch = epoch
       train_acc = tmp_train_acc
@@ -278,13 +329,70 @@ def main(cmd_opt):
                                                                                                      best_time))
   return train_acc, val_acc, test_acc
 
+def fine_tune(opt):
+  # opt['method'] = 'dopri5'#dopri5
+  # opt['no_alpha_sigmoid'] = True#True:no activate;False:activate
+  # # opt['alpha_activate'] = False
+  # # opt['allen_cahn'] = True#allen_cahn,particle,diffusion
+  # # opt['particle_beta'] = 'single'#multi,single
+  # opt['block'] = 'constant'#constant,attention
+  # opt['multi_layer'] = False
+  # opt['epoch'] = 150
+  # opt['hidden_dim'] =150
+  # opt['step_size'] = 0.2
+  # opt['init_alpha'] = 0
 
+  filename = 'FMP'
+  # +str(opt['alpha_activate'])+'init_alpha'+str(opt['init_alpha'])+'init_root'+str(opt['init_root'])+'fine_tune_lr='+str(opt['fine_tune_lr'])+'GCN_multi_alpha_fine_tune'
+  # opt['epoch'] = 
+  # opt['hidden_dim'] =100
+  dic = {}
+  sub_train,sub_val,sub_test,sub_alpha,sub_beta = [],[],[],[],[]
+  dic['train'] = []
+  dic['val'] = []
+  dic['test'] = [] 
+  dic['test_std'] = []
+  
+  dic['alpha'] = []
+  dic['energy'] = []
+  dic['beta'] = []
+  T_list =list(range(15, 19, 2))
+  for t in T_list:
+      sub_train,sub_val,sub_test,sub_alpha,sub_beta,sub_last_state,sub_coef = [],[],[],[],[],[],[]
+      opt['time'] = t
+
+      for i in range(3):
+          train_acc, val_acc, test_acc = main(opt)
+          sub_test.append(test_acc)
+          sub_train.append(train_acc)
+          sub_val.append(val_acc)
+      dic['train'].append(np.mean(sub_train))
+      dic['val'].append(np.mean(sub_val))
+      dic['test'].append(np.mean(sub_test))
+      dic['test_std'].append(np.std(sub_test))
+  '''
+  plot accuracy
+  '''
+  plt.plot(T_list,dic['train'],label='Train')
+  plt.plot(T_list,dic['val'],label='Val')
+  plt.plot(T_list,dic['test'],label='Test')
+  plt.legend(loc="lower left", fancybox=True)
+  plt.xlabel('Time')
+  plt.ylabel('Acc')
+  plt.ylim((0.5,1))
+  max_acc = max(dic['test'])
+  max_index = dic['test'].index(max_acc)
+  plt.title('achive best acc at {} with {:03f} std {:03f}'.format(T_list[max_index], max_acc, dic['test_std'][max_index]))
+  plt.savefig('figure/ACC'+filename+'.png',dpi = 200)  
+  plt.close()
+
+        
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--use_cora_defaults', action='store_true',
                       help='Whether to run with best params for cora. Overrides the choice of dataset')
   # data args
-  parser.add_argument('--dataset', type=str, default='Cora',
+  parser.add_argument('--dataset', type=str, default='texas',
                       help='Cora, Citeseer, Pubmed, Computers, Photo, CoauthorCS, ogbn-arxiv')
   parser.add_argument('--data_norm', type=str, default='rw',
                       help='rw for random walk, gcn for symmetric gcn norm')
@@ -349,7 +457,11 @@ if __name__ == '__main__':
   parser.add_argument("--max_test_steps", type=int, default=100,
                       help="Maximum number steps for the dopri5Early test integrator. "
                            "used if getting OOM errors at test time")
-
+  # UFG args
+  parser.add_argument('--init_scale_1', type=float, default=0.1, help="init value of coefficient of level 1 diffusion term")
+  parser.add_argument('--init_scale_2', type=float, default=0.1, help="init value of coefficient of level 2 diffusion term")
+  parser.add_argument('--init_scale_3', type=float, default=0.6, help="init value of coefficient of level 3 diffusion term")
+  parser.add_argument('--channel_mix', action='store_true', help='If mix channels in each layer')  
   # Attention args
   parser.add_argument('--leaky_relu_slope', type=float, default=0.2,
                       help='slope of the negative part of the leaky relu used in attention')
@@ -434,9 +546,21 @@ if __name__ == '__main__':
 
   parser.add_argument('--pos_dist_quantile', type=float, default=0.001, help="percentage of N**2 edges to keep")
 
-
+  parser.add_argument('--tune_mode', action='store_true', help='use multi reps to tune')
   args = parser.parse_args()
 
   opt = vars(args)
+  opt['dataset'] = 'squirrel'
+  opt['data_norm'] = 'rw'
+  opt['geom_gcn_splits'] = True
+  opt['not_lcc'] = False
+  opt['method'] = 'dopri5'
+  # opt['add_source'] = False
+  if opt['tune_mode']:
+    fine_tune(opt)
+  else:
+    main(opt)
 
-  main(opt)
+
+
+

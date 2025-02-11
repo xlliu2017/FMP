@@ -250,27 +250,31 @@ def set_pubmed_search_space(opt):
         opt["kinetic_energy"] = tune.loguniform(0.01, 1.0)
         opt["directional_penalty"] = tune.loguniform(0.01, 1.0)
 
-    opt["hidden_dim"] = 128  # tune.sample_from(lambda _: 2 ** np.random.randint(4, 8))
+    opt["hidden_dim"] =  tune.sample_from(lambda _: 2 ** np.random.randint(4, 7))
     opt["lr"] = tune.loguniform(0.02, 0.1)
-    opt["input_dropout"] = 0.4  # tune.uniform(0.2, 0.5)
+    opt["input_dropout"] = tune.uniform(0.2, 0.5)
     opt["dropout"] = tune.uniform(0, 0.5)
     opt["time"] = tune.uniform(5.0, 20.0)
     opt["optimizer"] = tune.choice(["rmsprop", "adam", "adamax"])
+    opt['init_scale_1'] = tune.grid_search([0.5, 1, 1.4])
+    opt['init_scale_2'] = tune.grid_search([0., 0.3])
+    opt['init_scale_3'] = tune.grid_search([0., 0.3, 1])
+    opt['add_source'] = tune.grid_search([True, False])
+    # self.opt['fc_out'] = tune.grid_search([True, False])
+    # if opt["block"] in {'attention', 'mixed'} or opt['function'] in {'GAT', 'transformer', 'dorsey'}:
+    #     opt["heads"] = tune.sample_from(lambda _: 2 ** np.random.randint(0, 4))
+    #     opt["attention_dim"] = tune.sample_from(lambda _: 2 ** np.random.randint(4, 8))
+    #     opt['attention_norm_idx'] = tune.choice([0, 1])
+    #     opt["leaky_relu_slope"] = tune.uniform(0, 0.8)
+    #     opt["self_loop_weight"] = tune.choice([0, 0.5, 1, 2]) if opt['block'] == 'mixed' else tune.choice(
+    #         [0, 1])  # whether or not to use self-loops
+    # else:
+    #     opt["self_loop_weight"] = tune.uniform(0, 3)
 
-    if opt["block"] in {'attention', 'mixed'} or opt['function'] in {'GAT', 'transformer', 'dorsey'}:
-        opt["heads"] = tune.sample_from(lambda _: 2 ** np.random.randint(0, 4))
-        opt["attention_dim"] = tune.sample_from(lambda _: 2 ** np.random.randint(4, 8))
-        opt['attention_norm_idx'] = tune.choice([0, 1])
-        opt["leaky_relu_slope"] = tune.uniform(0, 0.8)
-        opt["self_loop_weight"] = tune.choice([0, 0.5, 1, 2]) if opt['block'] == 'mixed' else tune.choice(
-            [0, 1])  # whether or not to use self-loops
-    else:
-        opt["self_loop_weight"] = tune.uniform(0, 3)
-
-    opt["tol_scale"] = tune.loguniform(1, 1e4)
+#     opt["tol_scale"] = tune.loguniform(1, 1e4)
 
     if opt["adjoint"]:
-        opt["tol_scale_adjoint"] = tune.loguniform(1, 1e4)
+        opt["tol_scale_adjoint"] = tune.loguniform(1e2, 1e4)
         opt["adjoint_method"] = tune.choice(["dopri5", "adaptive_heun"])
     else:
         raise Exception("Can't train on PubMed without the adjoint method.")
@@ -543,6 +547,10 @@ def set_search_space(opt):
     elif opt["dataset"] == "ogbn-arxiv":
         return set_arxiv_search_space(opt)
 
+class ExperimentTerminationReporter(CLIReporter):
+    def should_report(self, trials, done=True):
+        """Reports only on experiment termination."""
+        return done
 
 def main(opt):
     data_dir = os.path.abspath("../data")
@@ -555,7 +563,7 @@ def main(opt):
         grace_period=opt["grace_period"],
         reduction_factor=opt["reduction_factor"],
     )
-    reporter = CLIReporter(
+    reporter = ExperimentTerminationReporter(
         metric_columns=["accuracy", "test_acc", "train_acc", "loss", "training_iteration", "forward_nfe",
                         "backward_nfe"]
     )
@@ -670,7 +678,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reduction_factor", type=int, default=4, help="number of trials is halved after this many epochs"
     )
-    parser.add_argument("--name", type=str, default="ray_exp")
+    parser.add_argument("--name", type=str, default="ray_exp_pubmed")
     parser.add_argument("--num_splits", type=int, default=0, help="Number of random splits >= 0. 0 for planetoid split")
     parser.add_argument("--num_init", type=int, default=1, help="Number of random initializations >= 0")
 
@@ -701,11 +709,14 @@ if __name__ == "__main__":
     parser.add_argument("--not_lcc", action="store_false", help="don't use the largest connected component")
     parser.add_argument('--use_flux', dest='use_flux', action='store_true',
                         help='incorporate the feature grad in attention based edge dropout')
+    parser.add_argument('--geom_gcn_splits', dest='geom_gcn_splits', action='store_true',
+                      help='use the 10 fixed splits from '
+                           'https://arxiv.org/abs/2002.05287')
     parser.add_argument("--exact", action="store_true",
                         help="for small datasets can do exact diffusion. If dataset is too big for matrix inversion then you can't")
     parser.add_argument('--att_samp_pct', type=float, default=1,
                         help="float in [0,1). The percentage of edges to retain based on attention scores")
-
+    parser.add_argument('--beltrami', action='store_true', help='perform diffusion beltrami style')
     args = parser.parse_args()
 
     opt = vars(args)

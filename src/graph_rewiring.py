@@ -11,7 +11,7 @@ from torch_geometric.transforms.two_hop import TwoHop
 from torch_geometric.utils import add_self_loops, to_undirected, to_dense_adj, dense_to_sparse
 from torch_geometric.transforms import GDC
 from utils import get_rw_adj, get_full_adjacency, ROOT_DIR
-from pykeops.torch import LazyTensor
+# from pykeops.torch import LazyTensor
 import os
 import pickle
 from distances_kNN import apply_dist_KNN, apply_dist_threshold, get_distances, apply_feat_KNN

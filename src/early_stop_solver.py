@@ -33,7 +33,7 @@ class EarlyStopDopri5(RKAdaptiveStepsizeODESolver):
   mid = DPS_C_MID
 
   def __init__(self, func, y0, rtol, atol, opt, **kwargs):
-    super(EarlyStopDopri5, self).__init__(func, y0, rtol, atol, **kwargs)
+    super().__init__(func, y0, rtol, atol, **kwargs)
 
     self.lf = torch.nn.CrossEntropyLoss()
     self.m2_weight = None
@@ -89,6 +89,7 @@ class EarlyStopDopri5(RKAdaptiveStepsizeODESolver):
   def test(self, logits):
     accs = []
     for _, mask in self.data('train_mask', 'val_mask', 'test_mask'):
+      # mask = mask[:,6]
       pred = logits[mask].max(1)[1]
       acc = pred.eq(self.data.y[mask]).sum().item() / mask.sum().item()
       accs.append(acc)
@@ -116,6 +117,7 @@ class EarlyStopDopri5(RKAdaptiveStepsizeODESolver):
       loss = self.lf(z[self.data.train_mask], self.data.y.squeeze()[self.data.train_mask])
     else:
       loss = self.lf(z[self.data.train_mask], self.data.y[self.data.train_mask])
+      # loss = self.lf(z[self.data.train_mask[:,6]], self.data.y[self.data.train_mask[:,6]])
     train_acc, val_acc, test_acc = self.ode_test(z)
     log = 'ODE eval t0 {:.3f}, t1 {:.3f} Loss: {:.4f}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}'
     # print(log.format(t0, t1, loss, train_acc, val_acc, tmp_test_acc))
@@ -233,7 +235,7 @@ SOLVERS = {
 
 class EarlyStopInt(torch.nn.Module):
   def __init__(self, t, opt, device=None):
-    super(EarlyStopInt, self).__init__()
+    super().__init__()
     self.device = device
     self.solver = None
     self.data = None

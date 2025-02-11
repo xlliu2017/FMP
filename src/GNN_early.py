@@ -16,11 +16,13 @@ from model_configurations import set_block, set_function
 
 class GNNEarly(BaseGNN):
   def __init__(self, opt, dataset, device=torch.device('cpu')):
-    super(GNNEarly, self).__init__(opt, dataset, device)
+    super().__init__(opt, dataset, device)
     self.f = set_function(opt)
     block = set_block(opt)
     self.device = device
-    time_tensor = torch.tensor([0, self.T]).to(device)
+    # time_tensor = torch.tensor([0, self.T]).to(device)
+    time_tensor = torch.linspace(0, self.T, steps=50).to(device)
+
     # self.regularization_fns = ()
     self.odeblock = block(self.f, self.regularization_fns, opt, dataset.data, device, t=time_tensor).to(device)
     # overwrite the test integrator with this custom one

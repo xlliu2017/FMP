@@ -31,7 +31,7 @@ def create_regularization_fns(args):
 
 class ODEblock(nn.Module):
   def __init__(self, odefunc, regularization_fns, opt, data, device, t):
-    super(ODEblock, self).__init__()
+    super().__init__()
     self.opt = opt
     self.t = t
     
@@ -78,7 +78,7 @@ class ODEFunc(MessagePassing):
 
   # currently requires in_features = out_features
   def __init__(self, opt, data, device):
-    super(ODEFunc, self).__init__()
+    super().__init__()
     self.opt = opt
     self.device = device
     self.edge_index = None
@@ -97,7 +97,7 @@ class ODEFunc(MessagePassing):
 
 class BaseGNN(MessagePassing):
   def __init__(self, opt, dataset, device=torch.device('cpu')):
-    super(BaseGNN, self).__init__()
+    super().__init__()
     self.opt = opt
     self.T = opt['time']
     self.num_classes = dataset.num_classes
@@ -144,3 +144,19 @@ class BaseGNN(MessagePassing):
 
   def __repr__(self):
     return self.__class__.__name__
+
+  def compute_energy(self,x,edge_index):
+    energy = self.propagate(edge_index, x=x,norm=[],t=[],energy = True)
+    return torch.mean(energy,dim=0).item()
+
+  def message(self, x_i,x_j, norm,t,energy):
+    # x_j has shape [E, out_channels]
+    # Step 4: Normalize node features.
+    #[E,1]*[E,channel]
+    if energy:
+        return (torch.linalg.norm(x_j-x_i, dim=1)**2).unsqueeze(dim=1)
+      
+  def compute_enegry_evolution(self, edge_index, t_list):
+    inter_step = self.odeblock.integrateAt(t_list)
+    energy_list = [self.compute_energy(inter_step[i], edge_index) for i in range(inter_step.shape[0])]
+    return energy_list
