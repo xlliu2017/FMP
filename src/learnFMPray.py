@@ -1,4 +1,8 @@
 import numpy as np
+import scipy.sparse as sp
+from scipy.sparse.linalg import lobpcg
+from scipy import sparse
+
 import math
 import os.path as osp
 import torch
@@ -6,8 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter, Linear, Dropout, ReLU, BatchNorm1d
 
+from torch_sparse import spspmm
 from torch_geometric.datasets import WikipediaNetwork
 from torch_geometric.transforms import NormalizeFeatures
+from torch_geometric.utils import remove_self_loops, add_self_loops
 
 import ray
 from ray import tune
@@ -15,10 +21,11 @@ from ray import tune
 ###############################################################################
 #                         LOAD DATASET ONLY ONCE                              #
 ###############################################################################
-dataset_name = "chameleon"  # example dataset name
+# dataset_name = "chameleon"  # example dataset name
+dataset_name = 'squirrel'
 path = osp.join("./data", dataset_name)
-
 GLOBAL_DATASET = WikipediaNetwork(root=path, name=dataset_name, transform=NormalizeFeatures())
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ###############################################################################
 #                          OPTIONAL ADVANCED REWIRING                         #
@@ -67,9 +74,6 @@ def advanced_rewire(data, steps=2, dist_threshold=0.4):
 #                           SIGNLESS LAPLACIAN (OR STANDARD)                  #
 ###############################################################################
 def build_laplacian(edge_index, num_nodes, mode='signless'):
-    import numpy as np
-    import scipy.sparse as sp
-    from torch_geometric.utils import remove_self_loops, add_self_loops
 
     row, col = edge_index
     edge_index, _ = remove_self_loops(edge_index)
@@ -100,8 +104,6 @@ def build_laplacian(edge_index, num_nodes, mode='signless'):
 ###############################################################################
 #                      FRAMELET UTILS (UND. MULTI-LEVEL)                      #
 ###############################################################################
-from scipy import sparse
-from scipy.sparse.linalg import lobpcg
 
 def scipy_to_torch_sparse(A):
     A = sparse.coo_matrix(A)
@@ -153,7 +155,7 @@ def get_operator(L, DFilters, n, s, J, Lev):
 def build_framelet_ops(L, DFilters, n, s, Lev, device):
     num_nodes = L.shape[0]
     lobpcg_init = np.random.rand(num_nodes, 1).astype(np.float32)
-    lam_max, _ = lobpcg(L, lobpcg_init, maxiter=50)
+    lam_max, _ = lobpcg(L, lobpcg_init, maxiter=550)
     lam_max = float(lam_max[0])
 
     J = math.log(lam_max/np.pi, s) + Lev -1
@@ -170,8 +172,6 @@ def build_framelet_ops(L, DFilters, n, s, Lev, device):
 ###############################################################################
 #                     LEARNABLE CHEBYSHEV FILTER MODULE                      #
 ###############################################################################
-from torch_sparse import spspmm
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def sparse_scale(B, scalar):
             return torch.sparse_coo_tensor(
@@ -249,7 +249,7 @@ class LearnableChebFilter(nn.Module):
 #              BUILD ADJACENCY + TRIPLE-ATTENTION (LinkX)                     #
 ###############################################################################
 def build_adjacency_sp(data):
-    from torch_geometric.utils import remove_self_loops, add_self_loops
+
     edge_index = data.edge_index
     row, col = edge_index
     edge_index, _ = remove_self_loops(edge_index)
@@ -412,9 +412,15 @@ class ThreeBranchFramelet(nn.Module):
         if self.use_linkx:
             self.rowEmb = nn.Parameter(torch.randn(num_nodes, linkx_embed_dim))
             self.colEmb = nn.Parameter(torch.randn(num_nodes, linkx_embed_dim))
+            # self.colEmb = nn.Parameter(torch.randn(num_nodes, in_dim))
             nn.init.xavier_uniform_(self.rowEmb)
             nn.init.xavier_uniform_(self.colEmb)
+            # self.colEmb.requires_grad = False
+            # self.rowEmb.requires_grad = False
+            # self.lin_linkx_unify = nn.Linear(in_dim, final_hidden_dim, bias=False)
             self.lin_linkx_unify = nn.Linear(linkx_embed_dim, final_hidden_dim, bias=False)
+            self.dropout_linkx = nn.Dropout(dropout)
+            self.bn_linkx = nn.BatchNorm1d(final_hidden_dim)
         else:
             self.rowEmb = None
             self.colEmb = None
@@ -446,7 +452,15 @@ class ThreeBranchFramelet(nn.Module):
         if self.use_linkx:
             col_sum = torch.sparse.mm(adjacency_linkx, self.colEmb)
             x_adj = self.rowEmb + col_sum
+            # x_adj = col_sum
+            # x_neigh = x
+            # x_scaled = x * self.colEmb
+            # x_adj = torch.sparse.mm(adjacency_linkx, x_scaled)
+            # # x_adj = self.rowEmb + col_sum
             x_adj_u = self.lin_linkx_unify(x_adj)
+            # x_adj_u = self.bn_linkx(x_adj_u)
+            # x_adj_u = F.relu(x_adj_u)
+            # x_adj_u = self.dropout_linkx(x_adj_u)
         else:
             x_adj_u = torch.zeros(
                 x_poly.size(0),
@@ -467,18 +481,22 @@ class ThreeBranchFramelet(nn.Module):
 def train_with_tune(config):
     dataset = GLOBAL_DATASET
     data = dataset[0]
-    data.train_mask = data.train_mask[:, 0].bool()
-    data.val_mask   = data.val_mask[:, 0].bool()
-    data.test_mask  = data.test_mask[:, 0].bool()
+
+    # Here we assume data.train_mask, data.val_mask, data.test_mask 
+    # each has shape [num_nodes, 10], i.e. 10 standard splits
+    num_splits = data.train_mask.shape[1]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = data.to(device)
 
+    # Optionally rewire
     if config.get("rewire_flag", False):
         advanced_rewire(data, steps=2, dist_threshold=0.4)
 
+    # Build the Laplacian (once per trial)
     L_scipy = build_laplacian(data.edge_index, data.num_nodes, mode='signless')
 
+    # Decide whether to use learnable Chebyshev or regular framelets
     use_learnable = config.get("use_learnable_cheb_filter", False)
     if use_learnable:
         cheb_degree = config["cheb_poly_degree"]
@@ -499,11 +517,12 @@ def train_with_tune(config):
             DFilters = [D1, D2, D3]
         elif FrameType == 'Quadratic':
             D1 = lambda x: np.cos(x / 2) ** 3
-            D2 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2)), np.cos(x / 2) ** 2)
-            D3 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2) ** 2), np.cos(x / 2))
-            D4 = lambda x: np.sin(x / 2) ** 3
+            D2 = lambda x: np.sqrt(3)*np.sin(x / 2)*(np.cos(x / 2)**2)
+            D3 = lambda x: np.sqrt(3)*np.sin(x / 2)**2 * np.cos(x / 2)
+            D4 = lambda x: np.sin(x / 2)**3
             DFilters = [D1, D2, D3, D4]
         else:
+            # default to Haar
             D1 = lambda x: np.cos(x/2.)
             D2 = lambda x: np.sin(x/2.)
             DFilters = [D1, D2]
@@ -514,26 +533,35 @@ def train_with_tune(config):
         L_torch = None
         learnable_cheb = None
 
+    # Build adjacency for LinkX usage
     val = torch.ones(data.edge_index.size(1), dtype=torch.float32, device=device)
     adjacency_linkx = torch.sparse_coo_tensor(
         data.edge_index, val, (data.num_nodes, data.num_nodes)
     ).coalesce()
 
-    n_reps = 10
-    all_test = []
-    for rep in range(n_reps):
+    # We'll collect test accuracies across the 10 splits
+    test_accuracies = []
+
+    # Loop over each of the 10 standard splits
+    for split_id in range(num_splits):
+        # Extract masks for this split
+        train_mask = data.train_mask[:, split_id].bool()
+        val_mask   = data.val_mask[:, split_id].bool()
+        test_mask  = data.test_mask[:, split_id].bool()
+
+        # Initialize a fresh model for each split
         model = ThreeBranchFramelet(
             num_nodes=data.num_nodes,
             in_dim=data.x.size(1),
             out_dim=dataset.num_classes,
             d_list=d_list,
-            poly_hidden_dim=   config["poly_hidden_dim"],
-            n_framelet_layers= config["n_framelet_layers"],
-            local_hidden_dim=  config["local_hidden_dim"],
-            linkx_embed_dim=   config["linkx_embed_dim"],
-            aggregator_heads=  config["aggregator_heads"],
-            final_hidden_dim=  config["final_hidden_dim"],
-            dropout=           config["dropout"],
+            poly_hidden_dim=config["poly_hidden_dim"],
+            n_framelet_layers=config["n_framelet_layers"],
+            local_hidden_dim=config["local_hidden_dim"],
+            linkx_embed_dim=config["linkx_embed_dim"],
+            aggregator_heads=config["aggregator_heads"],
+            final_hidden_dim=config["final_hidden_dim"],
+            dropout=config["dropout"],
             use_learnable_cheb=use_learnable,
             L_torch=L_torch,
             learnable_cheb=learnable_cheb,
@@ -546,7 +574,7 @@ def train_with_tune(config):
             weight_decay=config["weight_decay"]
         )
 
-        best_val, best_test = 0., 0.
+        best_val, best_test = 0.0, 0.0
         best_state = None
         patience, max_patience = 0, 50
         epochs = config.get("epochs", 300)
@@ -555,37 +583,44 @@ def train_with_tune(config):
             model.train()
             optimizer.zero_grad()
             out = model(data.x, None, adjacency_linkx)
-            loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])
+            loss = F.nll_loss(out[train_mask], data.y[train_mask])
             loss.backward()
             optimizer.step()
 
+            # Evaluate
             model.eval()
             with torch.no_grad():
                 out_eval = model(data.x, None, adjacency_linkx)
+
             def accuracy(mask):
-                p = out_eval[mask].max(dim=1)[1]
-                return (p == data.y[mask]).sum().item() / mask.sum().item()
+                pred_labels = out_eval[mask].max(dim=1)[1]
+                return (pred_labels == data.y[mask]).sum().item() / mask.sum().item()
 
-            train_acc = accuracy(data.train_mask)
-            val_acc   = accuracy(data.val_mask)
-            test_acc  = accuracy(data.test_mask)
+            train_acc = accuracy(train_mask)
+            val_acc   = accuracy(val_mask)
+            test_acc  = accuracy(test_mask)
 
+            # Early stopping logic
             if val_acc > best_val:
-                best_val   = val_acc
-                best_test  = test_acc
+                best_val  = val_acc
+                best_test = test_acc
                 best_state = model.state_dict().copy()
                 patience = 0
             else:
                 patience += 1
+            
             if patience > max_patience:
                 break
 
+        # End of training for this split
         if best_state is not None:
             model.load_state_dict(best_state)
-        all_test.append(best_test)
+        test_accuracies.append(best_test)
 
-    test_acc_mean = float(np.mean(all_test))
-    test_acc_var  = float(np.var(all_test))
+    # After all 10 splits, compute the mean and variance
+    test_acc_mean = float(np.mean(test_accuracies))
+    test_acc_var  = float(np.var(test_accuracies))
+
     tune.report({"test_acc_mean": test_acc_mean, "test_acc_var": test_acc_var})
 
 
@@ -597,20 +632,20 @@ def run_ray_tune():
         "Lev":                tune.choice([2, 3]),
         "poly_degree":        tune.choice([2, 3]),
         "n_framelet_layers":  tune.choice([1, 2, 3]),
-        "poly_hidden_dim":    tune.choice([32, 64]),
+        "poly_hidden_dim":    tune.choice([32, 64, 128]),
         "local_hidden_dim":   tune.choice([32, 64]),
-        "linkx_embed_dim":    tune.choice([32, 64]),
+        "linkx_embed_dim":    tune.choice([128, 256]),
         "aggregator_heads":   tune.choice([1, 2]),
-        "final_hidden_dim":   tune.choice([64, 128]),
+        "final_hidden_dim":   tune.choice([128]),
         "dropout":            tune.uniform(0.3, 0.7),
         "lr":                 tune.loguniform(1e-4, 5e-3),
         "weight_decay":       tune.loguniform(1e-5, 1e-2),
         "epochs":             200,
-        "rewire_flag":        tune.choice([False]),
+        "rewire_flag":        tune.choice([True, False]),
         "FrameType":          tune.choice(["Haar", "Linear"]),
         "use_learnable_cheb_filter": tune.choice([False, True]),
         "cheb_poly_degree":         tune.choice([2, 3, 4]),
-        "use_linkx":                tune.choice([False, True])
+        "use_linkx":                tune.choice([True])
     }
 
     tuner = tune.run(
