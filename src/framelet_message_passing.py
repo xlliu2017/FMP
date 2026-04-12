@@ -19,7 +19,7 @@ def scipy_to_torch_sparse(matrix):
     return torch.sparse_coo_tensor(index, value, matrix.shape)
 
 
-def ChebyshevApprox(function, degree):
+def chebyshev_approx(function, degree):
     quad_points = 500
     coeffs = np.zeros(degree)
     scale = np.pi / 2
@@ -31,7 +31,7 @@ def ChebyshevApprox(function, degree):
 
 
 def get_operator(laplacian, decomposition_filters, degree, scale, start_level, levels):
-    filter_coeffs = [ChebyshevApprox(filter_fn, degree) for filter_fn in decomposition_filters]
+    filter_coeffs = [chebyshev_approx(filter_fn, degree) for filter_fn in decomposition_filters]
     domain_scale = np.pi / 2
     current = sparse.identity(laplacian.shape[0])
     operators = {}
@@ -65,7 +65,7 @@ def _get_framelet_filters(frame_type):
         d3 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2) ** 2), np.cos(x / 2))
         d4 = lambda x: np.sin(x / 2) ** 3
         return [d1, d2, d3, d4]
-    raise ValueError(f'Invalid frame_type: {frame_type}')
+    raise ValueError(f'Invalid frame_type: {frame_type}. Valid options are: Haar, Linear, Quadratic')
 
 
 def framelets(data, frame_type='Haar', levels=2, scale=2, degree=2):
@@ -121,4 +121,6 @@ class UFGLevel(MessagePassing):
         return edge_attr.view(-1, 1) * x_j
 
 
-__all__ = ['ChebyshevApprox', 'UFGLevel', 'framelets', 'get_operator', 'scipy_to_torch_sparse']
+ChebyshevApprox = chebyshev_approx
+
+__all__ = ['ChebyshevApprox', 'UFGLevel', 'chebyshev_approx', 'framelets', 'get_operator', 'scipy_to_torch_sparse']

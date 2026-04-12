@@ -75,7 +75,7 @@ python -m unittest discover -s test
 If you use this repository, please cite:
 
 ```bibtex
-@article{framelet_message_passing_2025,
+@article{fmp2025,
   title   = {Framelet message passing},
   journal = {Applied and Computational Harmonic Analysis},
   year    = {2025},
