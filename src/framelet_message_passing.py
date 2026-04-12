@@ -121,6 +121,4 @@ class UFGLevel(MessagePassing):
         return edge_attr.view(-1, 1) * x_j
 
 
-ChebyshevApprox = chebyshev_approx
-
-__all__ = ['ChebyshevApprox', 'UFGLevel', 'chebyshev_approx', 'framelets', 'get_operator', 'scipy_to_torch_sparse']
+__all__ = ['UFGLevel', 'chebyshev_approx', 'framelets', 'get_operator', 'scipy_to_torch_sparse']
