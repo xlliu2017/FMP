@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Dropout, ELU, Linear, Sequential as Seq
 
-from torch_geometric.nn import GATConv, MessagePassing
+from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import get_laplacian
 
 
@@ -65,7 +65,7 @@ def _get_framelet_filters(frame_type):
         d3 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2) ** 2), np.cos(x / 2))
         d4 = lambda x: np.sin(x / 2) ** 3
         return [d1, d2, d3, d4]
-    raise ValueError(f'Invalid FrameType: {frame_type}')
+    raise ValueError(f'Invalid frame_type: {frame_type}')
 
 
 def framelets(data, frame_type='Haar', levels=2, scale=2, degree=2):
@@ -109,7 +109,6 @@ class UFGLevel(MessagePassing):
             Linear(in_channels, out_channels),
         )
         nn.init.xavier_normal_(self.mlp[2].weight)
-        self.conv = GATConv(in_channels, out_channels, heads=1, dropout=dropout_prob)
 
     def forward(self, x, edge_index, edge_attr, edge_index_o=None):
         if self.channel_mix:
