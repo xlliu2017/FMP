@@ -18,7 +18,7 @@ The codebase builds on the continuous-depth graph learning framework already pre
 Create the environment from the provided Conda specification:
 
 ```bash
-conda env create -f /home/runner/work/FMP/FMP/environment.yml
+conda env create -f environment.yml
 conda activate fmp
 ```
 
@@ -31,7 +31,7 @@ Most citation-network datasets are downloaded automatically on first run.
 Create a root-level data directory before training:
 
 ```bash
-mkdir -p /home/runner/work/FMP/FMP/data
+mkdir -p data
 ```
 
 ## Running FMP
@@ -41,7 +41,7 @@ The main FMP path is enabled through `--data_norm ufg`.
 Example:
 
 ```bash
-cd /home/runner/work/FMP/FMP/src
+cd src
 python run_GNN.py \
   --dataset Cora \
   --block constant \
@@ -67,7 +67,6 @@ The active FMP implementation is now centralized in `src/framelet_message_passin
 The repository includes `unittest`-based tests under `test/`. In an environment with the project dependencies installed, run:
 
 ```bash
-cd /home/runner/work/FMP/FMP
 python -m unittest discover -s test
 ```
 
