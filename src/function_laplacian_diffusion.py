@@ -4,7 +4,7 @@ import torch_sparse
 import numpy as np
 from base_classes import ODEFunc
 from utils import MaxNFEException
-from sMP2 import UFGLevel
+from framelet_message_passing import UFGLevel
 
 # Define the ODE function.
 # Input:

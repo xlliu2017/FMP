@@ -1,175 +1,15 @@
-import numpy as np
-from scipy import sparse
-from scipy.sparse.linalg import lobpcg
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid
-from torch_geometric.utils import get_laplacian
-from torch_geometric.nn import GATConv
 import math, functools
 import argparse
 import os.path as osp
 
-from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import add_self_loops, degree
+from torch_geometric.utils import add_self_loops
 from torch.nn import Sequential as Seq, Linear, ReLU, GELU, ELU, Dropout
-
-
-# function for pre-processing
-@torch.no_grad()
-def scipy_to_torch_sparse(A):
-    A = sparse.coo_matrix(A)
-    row = torch.tensor(A.row)
-    col = torch.tensor(A.col)
-    index = torch.stack((row, col), dim=0)
-    value = torch.Tensor(A.data)
-
-    return torch.sparse_coo_tensor(index, value, A.shape)
-
-
-# function for pre-processing
-def ChebyshevApprox(f, n):  # assuming f : [0, pi] -> R
-    quad_points = 500
-    c = np.zeros(n)
-    a = np.pi / 2
-    for k in range(1, n + 1):
-        Integrand = lambda x: np.cos((k - 1) * x) * f(a * (np.cos(x) + 1))
-        x = np.linspace(0, np.pi, quad_points)
-        y = Integrand(x)
-        c[k - 1] = 2 / np.pi * np.trapz(y, x)
-
-    return c
-
-
-# function for pre-processing
-def get_operator(L, DFilters, n, s, J, Lev):
-    r = len(DFilters)
-    c = [None] * r
-    for j in range(r):
-        c[j] = ChebyshevApprox(DFilters[j], n)
-    a = np.pi / 2  # consider the domain of masks as [0, pi]
-    # Fast Tight Frame Decomposition (FTFD)
-    FD1 = sparse.identity(L.shape[0])
-    d = dict()
-    for l in range(1, Lev + 1):
-        for j in range(r):
-            T0F = FD1
-            T1F = ((s ** (-J + l - 1) / a) * L) @ T0F - T0F
-            d[j, l - 1] = (1 / 2) * c[j][0] * T0F + c[j][1] * T1F
-            for k in range(2, n):
-                TkF = ((2 / a * s ** (-J + l - 1)) * L) @ T1F - 2 * T1F - T0F
-                T0F = T1F
-                T1F = TkF
-                d[j, l - 1] += c[j][k] * TkF
-        FD1 = d[0, l - 1]
-
-    return d
-
-
-def framelets(dataset):
-    num_nodes = dataset.num_nodes
-    L = get_laplacian(dataset.edge_index, num_nodes=num_nodes, normalization='sym')
-    L = sparse.coo_matrix((L[1].numpy(), (L[0][0, :].numpy(), L[0][1, :].numpy())), shape=(num_nodes, num_nodes))
-
-    lobpcg_init = np.random.rand(num_nodes, 1)
-    lambda_max, _ = lobpcg(L, lobpcg_init, maxiter=50)
-    lambda_max = lambda_max[0]
-
-  
-    # lambda_max = 4000
-
-    ## FrameType = 'Haar'
-    FrameType = 'Haar'
-    if FrameType == 'Haar':
-        D1 = lambda x: np.cos(x / 2)
-        D2 = lambda x: np.sin(x / 2)
-        DFilters = [D1, D2]
-        RFilters = [D1, D2]
-    elif FrameType == 'Linear':
-        D1 = lambda x: np.square(np.cos(x / 2))
-        D2 = lambda x: np.sin(x) / np.sqrt(2)
-        D3 = lambda x: np.square(np.sin(x / 2))
-        DFilters = [D1, D2, D3]
-        RFilters = [D1, D2, D3]
-    elif FrameType == 'Quadratic':  # not accurate so far
-        D1 = lambda x: np.cos(x / 2) ** 3
-        D2 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2)), np.cos(x / 2) ** 2)
-        D3 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2) ** 2), np.cos(x / 2))
-        D4 = lambda x: np.sin(x / 2) ** 3
-        DFilters = [D1, D2, D3, D4]
-        RFilters = [D1, D2, D3, D4]
-    else:
-        raise Exception('Invalid FrameType')
-
-    Lev = 2  # level of transform
-    s = 2  # dilation scale
-    n = 2  # n - 1 = Degree of Chebyshev Polynomial Approximation
-    J = np.log(lambda_max / np.pi) / np.log(s) + Lev - 1  # dilation level to start the decomposition
-    r = len(DFilters)
-
-    # get matrix operators
-    d = get_operator(L, DFilters, n, s, J, Lev)
-    # enhance sparseness of the matrix operators (optional)
-    # d[np.abs(d) < 0.001] = 0.0
-    # store the matrix operators (torch sparse format) into a list: row-by-row
-    d_list = list()
-    for l in range(Lev):
-        for i in range(r):
-            d_list.append(scipy_to_torch_sparse(d[i, l]))
-    return d_list
-
-
-
-
-class UFGLevel(MessagePassing):
-    def __init__(self, in_channels, out_channels, init_scale=None, dropout_prob=0.5, atten=False, if_filter=True, channel_mix=False):
-        super().__init__(aggr='add')  # "Add" aggregation (Step 5).
-        # self.linear = torch.nn.Linear(in_channels, out_channels)
-        
-        self.atten = atten
-        self.dropout_prob = dropout_prob
-        self.init_scale = init_scale
-        self.channel_mix = channel_mix
-        if init_scale:
-          self.filter = nn.Parameter(torch.Tensor(1, in_channels))
-          nn.init.normal_(self.filter, mean=init_scale, std=0.1)
-        
-        self.linear = Linear(in_channels, out_channels)
-        self.mlp = Seq(
-                        ELU(),
-                        Dropout(dropout_prob),
-                        Linear(in_channels, out_channels),
-                        )
-        nn.init.xavier_normal_(self.mlp[2].weight)
-         
-        self.conv = GATConv(in_channels, out_channels, heads=1, dropout=dropout_prob)
-        
-        
-        
-    def forward(self, x, edge_index, edge_attr, edge_index_o=None):
-        # x has shape [N, in_channels]
-        # edge_index has shape [2, E]
-        # edge_attr has shape [2, E], i.e. the ajacent matrix at one single level
-        # Step 1: Linearly transform node feature matrix.
-        if self.channel_mix:
-            x = self.linear(x)
-        # if self.atten:
-        #     x = self.conv(self.propagate(edge_index, x=x, edge_attr=edge_attr), edge_index_o)
-        #     return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-        # else:
-        if self.init_scale:
-            return self.propagate(edge_index, x=x, edge_attr=edge_attr) * self.filter
-        else:
-            return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-        
-
-    def message(self, x_j, edge_attr):
-        # x_j has shape [E, out_channels]
-
-        # Calculate the framelets coeff.     
-        return edge_attr.view(-1, 1) * x_j
+from framelet_message_passing import UFGLevel, framelets
     
     
     
@@ -271,58 +111,14 @@ def objective(learning_rate = 0.01, weight_decay = 0.01, nhid = 32, dropout_prob
 
     # load dataset
  
-    rootname = osp.join('/home/liux0t/Xinliang/GFA', 'data', dataname)
+    repo_root = osp.abspath(osp.join(osp.dirname(__file__), '..'))
+    rootname = osp.join(repo_root, 'data', dataname)
     if NormalizeFeatures:
         dataset = Planetoid(root=rootname, name=dataname, transform=T.NormalizeFeatures()) #
     else:
         dataset = Planetoid(root=rootname, name=dataname)
 
-    num_nodes = dataset[0].x.shape[0]
-    L = get_laplacian(dataset[0].edge_index, num_nodes=num_nodes, normalization='sym')
-    L = sparse.coo_matrix((L[1].numpy(), (L[0][0, :].numpy(), L[0][1, :].numpy())), shape=(num_nodes, num_nodes))
-
-    lobpcg_init = np.random.rand(num_nodes, 1)
-    lambda_max, _ = lobpcg(L, lobpcg_init, maxiter=50)
-    lambda_max = lambda_max[0]
-
-    ## FrameType = 'Haar'
-    FrameType = 'Haar'
-    if FrameType == 'Haar':
-        D1 = lambda x: np.cos(x / 2)
-        D2 = lambda x: np.sin(x / 2)
-        DFilters = [D1, D2]
-        RFilters = [D1, D2]
-    elif FrameType == 'Linear':
-        D1 = lambda x: np.square(np.cos(x / 2))
-        D2 = lambda x: np.sin(x) / np.sqrt(2)
-        D3 = lambda x: np.square(np.sin(x / 2))
-        DFilters = [D1, D2, D3]
-        RFilters = [D1, D2, D3]
-    elif FrameType == 'Quadratic':  # not accurate so far
-        D1 = lambda x: np.cos(x / 2) ** 3
-        D2 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2)), np.cos(x / 2) ** 2)
-        D3 = lambda x: np.multiply((np.sqrt(3) * np.sin(x / 2) ** 2), np.cos(x / 2))
-        D4 = lambda x: np.sin(x / 2) ** 3
-        DFilters = [D1, D2, D3, D4]
-        RFilters = [D1, D2, D3, D4]
-    else:
-        raise Exception('Invalid FrameType')
-
-    Lev = 2  # level of transform
-    s = 2  # dilation scale
-    n = 2  # n - 1 = Degree of Chebyshev Polynomial Approximation
-    J = np.log(lambda_max / np.pi) / np.log(s) + Lev - 1  # dilation level to start the decomposition
-    r = len(DFilters)
-
-    # get matrix operators
-    d = get_operator(L, DFilters, n, s, J, Lev)
-    # enhance sparseness of the matrix operators (optional)
-    # d[np.abs(d) < 0.001] = 0.0
-    # store the matrix operators (torch sparse format) into a list: row-by-row
-    d_list = list()
-    for l in range(Lev):
-        for i in range(r):
-            d_list.append(scipy_to_torch_sparse(d[i, l]).to(device))
+    d_list = [operator.to(device) for operator in framelets(dataset[0])]
 
     # extract the data
     data = dataset[0].to(device)

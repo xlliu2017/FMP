@@ -1,7 +1,7 @@
 from base_classes import ODEblock
 import torch
 from utils import get_rw_adj, gcn_norm_fill_val
-from sMP2 import framelets
+from framelet_message_passing import framelets
 
 class ConstantODEblock(ODEblock):
     def __init__(self, odefunc, regularization_fns, opt, data, device, t=torch.tensor([0, 1])):
